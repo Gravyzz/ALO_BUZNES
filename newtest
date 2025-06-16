@@ -1,0 +1,176 @@
+import os
+import requests
+from datetime import datetime, timedelta
+import json
+import telebot
+from telebot import types
+from bs4 import BeautifulSoup
+import feedparser
+import yfinance as yf
+import openai
+import re
+
+# Конфигурация
+TELEGRAM_TOKEN = 'YOUR_TELEGRAM_TOKEN'  # Замените на реальный токен
+RBC_RSS_URL = 'https://rssexport.rbc.ru/rbcnews/news/30/full.rss'
+FOREX_API = 'https://api.exchangerate-api.com/v4/latest/USD'
+CRYPTO_API = 'https://api.coingecko.com/api/v3/simple/price'
+STOCK_API = yf
+FORBES_URL = 'https://www.forbes.com/business/'
+TELEGRAM_PREMIUM_API = 'https://fragment.com/numbers'
+
+# Инициализация бота
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+NEWSAPI_KEY = 'YOUR_NEWSAPI_KEY'  # Замените на реальный ключ
+OPENAI_API_KEY = 'YOUR_OPENAI_KEY'  # Замените на реальный ключ
+openai.api_key = OPENAI_API_KEY
+
+user_states = {}
+
+def set_state(chat_id, state, data=None):
+    user_states[chat_id] = {'state': state, 'data': data}
+
+def get_state(chat_id):
+    state_data = user_states.get(chat_id)
+    return state_data['state'] if state_data else None
+
+def get_data(chat_id):
+    state_data = user_states.get(chat_id)
+    return state_data['data'] if state_data else None
+
+# Клавиатуры (ТОЛЬКО ОДНО ОПРЕДЕЛЕНИЕ!)
+def create_main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton('📈 Акции'))
+    keyboard.add(types.KeyboardButton('🔍 Поиск акций'))  
+    keyboard.add(types.KeyboardButton('💱 Валюты'))
+    keyboard.add(types.KeyboardButton('📰 Новостная выжимка'))
+    keyboard.add(types.KeyboardButton('📰 Последняя новость с Пульса'))
+    keyboard.add(types.KeyboardButton('ℹ️ О боте'))
+    return keyboard
+
+def create_stocks_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton('🇷🇺 Российские акции'))
+    keyboard.add(types.KeyboardButton('🇺🇸 Американские акции'))
+    keyboard.add(types.KeyboardButton('🔙 Назад'))
+    return keyboard
+
+def create_currency_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add(types.KeyboardButton('💵 USD/RUB'))
+    keyboard.add(types.KeyboardButton('💶 EUR/RUB'))
+    keyboard.add(types.KeyboardButton('💷 GBP/RUB'))
+    keyboard.add(types.KeyboardButton('💴 CNY/RUB'))
+    keyboard.add(types.KeyboardButton('₿ Криптовалюты'))
+    keyboard.add(types.KeyboardButton('🔙 Назад'))
+    return keyboard
+
+# Функция поиска акций
+def search_stocks(query):
+    try:
+        url = "https://fin-plan.org/stocks/rus/"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Упрощенный поиск акций
+        stocks = []
+        stock_items = soup.select('.stock-item')  # Измените селектор в соответствии с реальной структурой сайта
+        
+        for item in stock_items:
+            try:
+                name = item.select_one('.stock-name').text.strip()
+                price = item.select_one('.stock-price').text.strip()
+                if query.lower() in name.lower():
+                    stocks.append((name, price))
+            except:
+                continue
+        
+        return stocks[:10]  # Возвращаем не более 10 результатов
+    
+    except Exception as e:
+        print(f"Ошибка при поиске акций: {str(e)}")
+        return [("Ошибка поиска", "Попробуйте позже")]
+
+# Обработчики команд
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    set_state(message.chat.id, None)
+    bot.send_message(
+        message.chat.id,
+        "📊 <b>Финансовый помощник</b>\n\n"
+        "Я предоставляю актуальную информацию о:\n"
+        "- Курсах валют 💱\n"
+        "- Стоимости акций 📈\n"
+        "- Новостная выжимка 📰\n\n"
+        "Выберите интересующий вас раздел:",
+        parse_mode='HTML',
+        reply_markup=create_main_keyboard()
+    )
+
+@bot.message_handler(func=lambda message: message.text == '🔍 Поиск акций')
+def start_stock_search(message):
+    set_state(message.chat.id, 'waiting_stock_query')
+    bot.send_message(
+        message.chat.id,
+        "🔍 Введите название акции или тикер (например, Газпром или GAZP):",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
+@bot.message_handler(func=lambda message: get_state(message.chat.id) == 'waiting_stock_query')
+def handle_stock_query(message):
+    try:
+        bot.send_message(message.chat.id, "⏳ Идет поиск... Пожалуйста, подождите.")
+        matches = search_stocks(message.text.strip())
+        
+        if not matches:
+            bot.send_message(message.chat.id, "❌ Акции не найдены. Попробуйте другой запрос.", reply_markup=create_main_keyboard())
+            set_state(message.chat.id, None)
+            return
+        
+        if len(matches) == 1:
+            name, price = matches[0]
+            bot.send_message(message.chat.id, f"📋 <b>{name}</b>\n💰 Цена: {price}", parse_mode='HTML', reply_markup=create_main_keyboard())
+            set_state(message.chat.id, None)
+        else:
+            response = "🔍 Найдено несколько акций:\n\n"
+            for idx, (name, price) in enumerate(matches, 1):
+                response += f"{idx}. {name} - {price}\n"
+            
+            response += "\nВведите номер акции для подробной информации:"
+            bot.send_message(message.chat.id, response)
+            set_state(message.chat.id, 'waiting_stock_choice', data=matches)
+    
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка при обработке запроса: {str(e)}", reply_markup=create_main_keyboard())
+        set_state(message.chat.id, None)
+
+@bot.message_handler(func=lambda message: get_state(message.chat.id) == 'waiting_stock_choice')
+def handle_stock_choice(message):
+    try:
+        matches = get_data(message.chat.id)
+        if not matches:
+            bot.send_message(message.chat.id, "❌ Данные устарели. Начните поиск заново.", reply_markup=create_main_keyboard())
+            set_state(message.chat.id, None)
+            return
+        
+        choice = int(message.text.strip())
+        if 1 <= choice <= len(matches):
+            name, price = matches[choice-1]
+            bot.send_message(message.chat.id, f"📋 <b>{name}</b>\n💰 Цена: {price}", parse_mode='HTML')
+        else:
+            bot.send_message(message.chat.id, f"❌ Неверный номер. Введите число от 1 до {len(matches)}")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Пожалуйста, введите корректный номер.")
+    finally:
+        set_state(message.chat.id, None)
+        bot.send_message(message.chat.id, "Главное меню:", reply_markup=create_main_keyboard())
+
+# Запуск бота
+if __name__ == '__main__':
+    print("Бот запущен...")
+    bot.infinity_polling()
